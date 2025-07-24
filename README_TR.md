@@ -194,22 +194,145 @@ asyncio.run(main())
 
 ## 🛠️ Kurulum ve Konfigürasyon
 
-### 🐳 Docker ile Hızlı Başlangıç
+### � Gereksinimler
+- **Docker & Docker Compose** (PostgreSQL için)
+- **Python 3.8+** pip ile
+- **Ollama** (yerel AI modelleri)
+- **Git** (repository klonlamak için)
+
+### 1. 📥 Projeyi Klonlayın
 ```bash
-# Pagila veritabanını başlat
-cd pagila/
-docker-compose up -d
+# Bu repository'yi klonlayın
+git clone https://github.com/aliosmangurbilek/iga_staj_project.git
+cd iga_staj_project
 
-# Python environment
-pip install -r requirements.txt
-
-# Tüm arayüzleri başlat
-./start_all.sh  # (Opsiyonel script)
+# pagila dizini zaten submodule olarak dahil edilmiş
 ```
 
-### ⚙️ Manuel Konfigürasyon
+### 2. 🗄️ Veritabanı Kurulumu (PostgreSQL + Pagila)
+```bash
+# Pagila dizinine gidin
+cd pagila/
+
+# Docker Compose ile PostgreSQL'i başlatın
+docker-compose up -d
+
+# Veritabanının hazır olmasını bekleyin (yaklaşık 30 saniye)
+sleep 30
+
+# Veritabanının çalıştığını doğrulayın
+docker ps | grep postgres
+
+# Veritabanı bağlantısını test edin
+psql -h localhost -U postgres -d pagila -c "SELECT COUNT(*) FROM film;"
+# Sonuç: count: 1000 olmalı
+```
+
+**Veritabanı Bilgileri:**
+- **Host**: localhost
+- **Port**: 5432
+- **Database**: pagila
+- **Kullanıcı Adı**: postgres
+- **Şifre**: 2336
+
+**pgAdmin Web Arayüzü:**
+- **URL**: http://localhost:5050
+- **Email**: admin@pagila.com
+- **Şifre**: admin2336
+
+### 3. 🤖 Ollama Kurulumu
+```bash
+# Ollama'yı yükleyin (henüz yüklü değilse)
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Ollama servisini başlatın
+ollama serve &
+
+# Gerekli modelleri indirin
+ollama pull mistral:7b-instruct
+ollama pull mxbai-embed-large
+
+# Modellerin indirildiğini doğrulayın
+ollama list
+```
+
+### 4. 🐍 Python Ortamı Kurulumu
+```bash
+# Proje kök dizinine dönün
+cd ..
+
+# Gerekli paketleri yükleyin
+pip install streamlit flask flask-cors plotly pandas psycopg2-binary aiohttp
+
+# Veya requirements.txt kullanın (gerekirse oluşturun)
+pip install -r requirements.txt
+```
+
+### 5. 🔧 Ortam Değişkenleri Konfigürasyonu
+```bash
+# Ortam değişkenlerini ayarlayın (opsiyonel, varsayılanlar çalışır)
+export DATABASE_URL="postgresql://postgres:2336@localhost:5432/pagila"
+export OLLAMA_HOST="http://localhost:11434"
+export OLLAMA_MODEL="mistral:7b-instruct"
+export OLLAMA_EMBEDDING_MODEL="mxbai-embed-large"
+```
+
+### 6. 🧪 Kurulumu Test Edin
+```bash
+# Kurulumunuzu test edin
+python test_your_setup.py
+
+# Kapsamlı testleri çalıştırın
+python final_test.py
+```
+
+### 7. 🚀 Uygulamaları Başlatın
+
+#### Hızlı Başlangıç (Tüm Servisler)
+```bash
+# Tek komutla her şeyi başlatın
+./start_all.sh
+```
+
+#### Manuel Başlatma (Ayrı Servisler)
+```bash
+# Seçenek 1: Gelişmiş Streamlit Pro (Önerilen)
+streamlit run app_pro.py --port 8502
+
+# Seçenek 2: Flask API + Web Arayüzü
+python flask_api.py
+
+# Seçenek 3: Temel Streamlit Uygulaması
+streamlit run streamlit_app.py --port 8501
+```
+
+### 🐳 Docker Compose Detayları
+`pagila/docker-compose.yml` şunları içerir:
+```yaml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: pagila
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 2336
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pagila-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./pagila-data.sql:/docker-entrypoint-initdb.d/02-data.sql
+    command: postgres -c shared_preload_libraries=pg_stat_statements
+
+volumes:
+  postgres_data:
+```
+
+### ⚙️ Manuel Konfigürasyon (Opsiyonel)
 ```python
-# config.py (önerilen)
+# config.py (özel ayarlar için)
 DATABASE_CONFIG = {
     'host': 'localhost',
     'port': 5432,

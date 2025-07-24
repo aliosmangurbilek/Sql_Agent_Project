@@ -194,22 +194,145 @@ asyncio.run(main())
 
 ## 🛠️ Installation and Configuration
 
-### 🐳 Quick Start with Docker
+### � Prerequisites
+- **Docker & Docker Compose** (for PostgreSQL)
+- **Python 3.8+** with pip
+- **Ollama** (local AI models)
+- **Git** (for cloning repositories)
+
+### 1. 📥 Clone the Project
 ```bash
-# Start Pagila database
-cd pagila/
-docker-compose up -d
+# Clone this repository
+git clone https://github.com/aliosmangurbilek/iga_staj_project.git
+cd iga_staj_project
 
-# Python environment
-pip install -r requirements.txt
-
-# Start all interfaces
-./start_all.sh  # (Optional script)
+# The pagila directory is already included as a submodule
 ```
 
-### ⚙️ Manual Configuration
+### 2. 🗄️ Database Setup (PostgreSQL + Pagila)
+```bash
+# Navigate to pagila directory
+cd pagila/
+
+# Start PostgreSQL with Docker Compose
+docker-compose up -d
+
+# Wait for database to be ready (about 30 seconds)
+sleep 30
+
+# Verify database is running
+docker ps | grep postgres
+
+# Test database connection
+psql -h localhost -U postgres -d pagila -c "SELECT COUNT(*) FROM film;"
+# Should return: count: 1000
+```
+
+**Database Details:**
+- **Host**: localhost
+- **Port**: 5432
+- **Database**: pagila
+- **Username**: postgres
+- **Password**: 2336
+
+**pgAdmin Web Interface:**
+- **URL**: http://localhost:5050
+- **Email**: admin@pagila.com
+- **Password**: admin2336
+
+### 3. 🤖 Ollama Setup
+```bash
+# Install Ollama (if not already installed)
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Start Ollama service
+ollama serve &
+
+# Download required models
+ollama pull mistral:7b-instruct
+ollama pull mxbai-embed-large
+
+# Verify models are downloaded
+ollama list
+```
+
+### 4. 🐍 Python Environment Setup
+```bash
+# Return to project root
+cd ..
+
+# Install required packages
+pip install streamlit flask flask-cors plotly pandas psycopg2-binary aiohttp
+
+# Or use requirements.txt (create if needed)
+pip install -r requirements.txt
+```
+
+### 5. 🔧 Environment Configuration
+```bash
+# Set environment variables (optional, defaults work)
+export DATABASE_URL="postgresql://postgres:2336@localhost:5432/pagila"
+export OLLAMA_HOST="http://localhost:11434"
+export OLLAMA_MODEL="mistral:7b-instruct"
+export OLLAMA_EMBEDDING_MODEL="mxbai-embed-large"
+```
+
+### 6. 🧪 Test Installation
+```bash
+# Test your setup
+python test_your_setup.py
+
+# Run comprehensive tests
+python final_test.py
+```
+
+### 7. 🚀 Launch Applications
+
+#### Quick Start (All Services)
+```bash
+# Start everything with one command
+./start_all.sh
+```
+
+#### Manual Start (Individual Services)
+```bash
+# Option 1: Advanced Streamlit Pro (Recommended)
+streamlit run app_pro.py --port 8502
+
+# Option 2: Flask API + Web Interface
+python flask_api.py
+
+# Option 3: Basic Streamlit App
+streamlit run streamlit_app.py --port 8501
+```
+
+### 🐳 Docker Compose Details
+The `pagila/docker-compose.yml` contains:
+```yaml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: pagila
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 2336
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pagila-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./pagila-data.sql:/docker-entrypoint-initdb.d/02-data.sql
+    command: postgres -c shared_preload_libraries=pg_stat_statements
+
+volumes:
+  postgres_data:
+```
+
+### ⚙️ Manual Configuration (Optional)
 ```python
-# config.py (recommended)
+# config.py (for custom settings)
 DATABASE_CONFIG = {
     'host': 'localhost',
     'port': 5432,
