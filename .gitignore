@@ -212,3 +212,6 @@ pagila/data/
 # pgAdmin
 pagila/pgadmin/sessions/
 pagila/pgadmin/storage/
+
+# Project specific - Database files
+pagila/

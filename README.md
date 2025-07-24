@@ -27,10 +27,7 @@ pip install streamlit flask flask-cors plotly pandas psycopg2-binary aiohttp
 
 ### 3. Launch Interfaces
 ```bash
-# Basic Streamlit App
-streamlit run streamlit_app.py --port 8501
-
-# Advanced Pro App (Recommended)
+# Streamlit Pro App (Main Interface)
 streamlit run app_pro.py --port 8502
 
 # Flask API + Web Interface
@@ -38,9 +35,8 @@ python flask_api.py
 ```
 
 ### 4. Access Your AI Assistant
-- **🎨 Streamlit Pro**: http://localhost:8502 *(Recommended for interactive analysis)*
+- **🎨 Streamlit Pro**: http://localhost:8502 *(Main interactive interface)*
 - **🔌 Flask API**: http://localhost:5000 *(For REST API and web interface)*
-- **💻 Basic Streamlit**: http://localhost:8501 *(Simple query interface)*
 
 ---
 
@@ -115,18 +111,18 @@ asyncio.run(main())
 
 ## 📊 Feature Comparison
 
-| Feature | Streamlit Basic | Streamlit Pro | Flask API | CLI |
-|---------|-----------------|---------------|-----------|-----|
-| 🖥️ Web Interface | ✅ | ✅ | ✅ | ❌ |
-| 🔌 REST API | ❌ | ❌ | ✅ | ❌ |
-| 📊 Visualization | ✅ | ✅✅ | ❌ | ❌ |
-| 📈 Dashboard | ❌ | ✅ | ❌ | ❌ |
-| 📋 Query History | ❌ | ✅ | ❌ | ❌ |
-| ⚡ Performance Metrics | ❌ | ✅ | ❌ | ❌ |
-| 🔧 System Tools | ❌ | ✅ | ❌ | ❌ |
-| 💾 Data Download | ✅ | ✅ | ❌ | ❌ |
-| 🤖 AI Analysis | ✅ | ✅ | ✅ | ✅ |
-| 🚀 Fast SQL | ✅ | ✅ | ✅ | ✅ |
+| Feature | Streamlit Pro | Flask API | CLI |
+|---------|---------------|-----------|-----|
+| 🖥️ Web Interface | ✅ | ✅ | ❌ |
+| 🔌 REST API | ❌ | ✅ | ❌ |
+| 📊 Visualization | ✅✅ | ❌ | ❌ |
+| 📈 Dashboard | ✅ | ❌ | ❌ |
+| 📋 Query History | ✅ | ❌ | ❌ |
+| ⚡ Performance Metrics | ✅ | ❌ | ❌ |
+| 🔧 System Tools | ✅ | ❌ | ❌ |
+| 💾 Data Download | ✅ | ❌ | ❌ |
+| 🤖 AI Analysis | ✅ | ✅ | ✅ |
+| 🚀 Fast SQL | ✅ | ✅ | ✅ |
 
 ## 🎯 Demo Queries
 
@@ -296,14 +292,11 @@ python final_test.py
 
 #### Manual Start (Individual Services)
 ```bash
-# Option 1: Advanced Streamlit Pro (Recommended)
+# Option 1: Streamlit Pro (Main Interface)
 streamlit run app_pro.py --port 8502
 
 # Option 2: Flask API + Web Interface
 python flask_api.py
-
-# Option 3: Basic Streamlit App
-streamlit run streamlit_app.py --port 8501
 ```
 
 ### 🐳 Docker Compose Details
