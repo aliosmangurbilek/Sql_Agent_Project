@@ -7,10 +7,47 @@ import asyncio
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import aiohttp
+import json
 
+def setup_environment():
+    """Set up environment variables for consistent operation"""
+    os.environ["DATABASE_URL"] = "postgresql://postgres:2336@localhost:5432/pagila"
+    os.environ["CHAT_MODEL"] = "mistral:7b-instruct"
+    os.environ["EMBED_MODEL"] = "mxbai-embed-large"
+    os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
+    os.environ["OLLAMA_HOST"] = "http://localhost:11434"
+    os.environ["OLLAMA_MODEL"] = "mistral:7b-instruct"
+    os.environ["OLLAMA_EMBEDDING_MODEL"] = "mxbai-embed-large"
+
+async def get_embedding(text: str) -> list:
+    """Generate embedding for text using Ollama."""
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            embed_url = f"{os.getenv('OLLAMA_BASE_URL')}/api/embeddings"
+            payload = {
+                "model": os.getenv('OLLAMA_EMBEDDING_MODEL'),
+                "prompt": text
+            }
+            
+            async with session.post(embed_url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get('embedding', [])
+                else:
+                    print(f"❌ Embedding API error: {response.status}")
+                    return []
+                    
+    except Exception as e:
+        print(f"❌ Error generating embedding: {e}")
+        return []
 
 async def setup_documents_table():
     """Create the documents table with pgvector support."""
+    
+    # Setup environment first
+    setup_environment()
     
     print("=== Setting up Documents Table ===\n")
     
@@ -24,17 +61,16 @@ async def setup_documents_table():
         conn.autocommit = True
         
         with conn.cursor() as cursor:
-            # Install pgvector extension if not exists
+            # Install pgvector extension
             print("🔧 Installing pgvector extension...")
             try:
                 cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
                 print("✅ pgvector extension ready")
             except psycopg2.Error as e:
                 print(f"❌ Failed to install pgvector: {e}")
-                print("   You may need superuser privileges or install pgvector manually")
                 return False
             
-            # Create documents table
+            # Create documents table WITH vector column
             print("📊 Creating documents table...")
             table_sql = """
                 CREATE TABLE IF NOT EXISTS documents (
@@ -46,19 +82,34 @@ async def setup_documents_table():
                 );
             """
             cursor.execute(table_sql)
-            print("✅ Documents table created")
+            print("✅ Documents table created (with vector search)")
             
-            # Create index for vector similarity search
+            # Create vector similarity index
             print("🗂️ Creating vector similarity index...")
             try:
-                cursor.execute("CREATE INDEX IF NOT EXISTS documents_embedding_idx ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);")
-                print("✅ Vector index created")
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_embedding_idx 
+                    ON documents USING ivfflat (embedding vector_cosine_ops) 
+                    WITH (lists = 100);
+                """)
+                print("✅ Vector similarity index created")
             except psycopg2.Error as e:
                 print(f"⚠️  Vector index creation failed: {e}")
                 print("   This is normal if the table is empty. Index will be created when you add documents.")
             
-            # Insert sample documents
-            print("📝 Inserting sample documents...")
+            # Also create text search index as fallback
+            print("🗂️ Creating full-text search index as fallback...")
+            try:
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_content_search_idx 
+                    ON documents USING gin(to_tsvector('english', COALESCE(title, '') || ' ' || content));
+                """)
+                print("✅ Full-text search index created as fallback")
+            except psycopg2.Error as e:
+                print(f"⚠️  Text search index creation failed: {e}")
+            
+            # Insert sample documents WITH embeddings
+            print("\n🧠 Processing sample documents with embeddings...")
             sample_docs = [
                 ("Machine Learning Basics", 
                  "Machine learning is a subset of artificial intelligence that enables computers to learn and make decisions from data without being explicitly programmed. It involves algorithms that can identify patterns in data and make predictions or classifications based on those patterns."),
@@ -76,16 +127,48 @@ async def setup_documents_table():
                  "Web development involves creating and maintaining websites and web applications. It includes front-end development (user interface), back-end development (server-side logic), and database management. Modern web development uses frameworks and tools to create responsive, interactive web experiences.")
             ]
             
-            for title, content in sample_docs:
-                cursor.execute(
-                    "INSERT INTO documents (title, content) VALUES (%s, %s) ON CONFLICT DO NOTHING;",
-                    (title, content)
-                )
+            # Generate embeddings for each document
+            for i, (title, content) in enumerate(sample_docs, 1):
+                print(f"   Processing document {i}/{len(sample_docs)}: {title[:50]}...")
+                
+                try:
+                    # Generate embedding
+                    embedding = await get_embedding(content)
+                    if embedding:
+                        # Convert to pgvector format
+                        embedding_str = f"[{','.join(map(str, embedding))}]"
+                        
+                        cursor.execute("""
+                            INSERT INTO documents (title, content, embedding) 
+                            VALUES (%s, %s, %s) 
+                            ON CONFLICT DO NOTHING
+                        """, (title, content, embedding_str))
+                        print(f"   ✅ Document {i} embedded and stored")
+                    else:
+                        # Fallback without embedding
+                        cursor.execute("""
+                            INSERT INTO documents (title, content) 
+                            VALUES (%s, %s) 
+                            ON CONFLICT DO NOTHING
+                        """, (title, content))
+                        print(f"   ⚠️  Document {i} stored without embedding")
+                        
+                except Exception as e:
+                    print(f"   ❌ Error processing document {i}: {e}")
+                    # Store without embedding as fallback
+                    cursor.execute("""
+                        INSERT INTO documents (title, content) 
+                        VALUES (%s, %s) 
+                        ON CONFLICT DO NOTHING
+                    """, (title, content))
             
             # Check how many documents we have
             cursor.execute("SELECT COUNT(*) FROM documents;")
             count = cursor.fetchone()[0]
-            print(f"✅ Documents table ready with {count} sample documents")
+            cursor.execute("SELECT COUNT(*) FROM documents WHERE embedding IS NOT NULL;")
+            embedded_count = cursor.fetchone()[0]
+            print(f"✅ Documents table ready with {count} documents ({embedded_count} with embeddings)")
+            
             
         conn.close()
         return True
@@ -96,111 +179,101 @@ async def setup_documents_table():
 
 
 async def generate_embeddings_for_documents():
-    """Generate embeddings for all documents that don't have them yet."""
+    """Generate embeddings for documents that don't have them yet."""
     
-    print("\n=== Generating Embeddings ===\n")
+    print("\n=== Generating Embeddings for Documents ===\n")
     
     try:
-        import aiohttp
-        
-        ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-        embedding_model = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
-        
-        print(f"🤖 Using model: {embedding_model}")
-        
-        # Get documents without embeddings
         conn = psycopg2.connect(os.getenv('DATABASE_URL'))
         
-        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        with conn.cursor() as cursor:
+            # Find documents without embeddings
             cursor.execute("SELECT id, title, content FROM documents WHERE embedding IS NULL;")
             documents = cursor.fetchall()
             
-        if not documents:
-            print("✅ All documents already have embeddings")
-            conn.close()
-            return True
-        
-        print(f"📄 Generating embeddings for {len(documents)} documents...")
-        
-        async with aiohttp.ClientSession() as session:
-            for doc in documents:
-                print(f"   Processing: {doc['title'][:50]}...")
-                
-                # Generate embedding
-                payload = {
-                    "model": embedding_model,
-                    "prompt": doc['content']
-                }
+            if not documents:
+                print("✅ All documents already have embeddings!")
+                return True
+            
+            print(f"📊 Found {len(documents)} documents without embeddings")
+            
+            for doc_id, title, content in documents:
+                print(f"   Processing: {title[:50]}...")
                 
                 try:
-                    async with session.post(
-                        f"{ollama_host}/api/embeddings",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        if response.status == 200:
-                            embedding_data = await response.json()
-                            embedding = embedding_data.get('embedding')
-                            
-                            if embedding:
-                                # Update document with embedding
-                                vector_str = '[' + ','.join(map(str, embedding)) + ']'
-                                
-                                with conn.cursor() as update_cursor:
-                                    update_cursor.execute(
-                                        "UPDATE documents SET embedding = %s::vector WHERE id = %s;",
-                                        (vector_str, doc['id'])
-                                    )
-                                    conn.commit()
-                                
-                                print(f"   ✅ Generated embedding for: {doc['title']}")
-                            else:
-                                print(f"   ❌ No embedding returned for: {doc['title']}")
-                        else:
-                            error_text = await response.text()
-                            print(f"   ❌ API error for {doc['title']}: {response.status} - {error_text}")
-                            
+                    embedding = await get_embedding(content)
+                    if embedding:
+                        embedding_str = f"[{','.join(map(str, embedding))}]"
+                        cursor.execute(
+                            "UPDATE documents SET embedding = %s WHERE id = %s;",
+                            (embedding_str, doc_id)
+                        )
+                        print(f"   ✅ Embedding generated for document {doc_id}")
+                    else:
+                        print(f"   ⚠️  Failed to generate embedding for document {doc_id}")
+                        
                 except Exception as e:
-                    print(f"   ❌ Failed to generate embedding for {doc['title']}: {e}")
+                    print(f"   ❌ Error processing document {doc_id}: {e}")
+            
+            conn.commit()
+            
+            # Final count
+            cursor.execute("SELECT COUNT(*) FROM documents WHERE embedding IS NOT NULL;")
+            embedded_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM documents;")
+            total_count = cursor.fetchone()[0]
+            
+            print(f"✅ Embedding generation complete: {embedded_count}/{total_count} documents have embeddings")
         
         conn.close()
-        print("✅ Embedding generation complete!")
         return True
         
-    except ImportError:
-        print("❌ aiohttp not available. Install with: pip install aiohttp")
-        return False
     except Exception as e:
         print(f"❌ Error generating embeddings: {e}")
         return False
 
 
 async def test_document_search():
-    """Test the document search functionality."""
+    """Test the document search functionality using PostgreSQL full-text search."""
     
-    print("\n=== Testing Document Search ===\n")
+    print("\n=== Testing Text-Based Document Search ===\n")
     
     try:
-        from schema_tools import search_documents
+        conn = psycopg2.connect(os.getenv('DATABASE_URL'))
         
         test_queries = [
-            "programming languages and software development",
-            "artificial intelligence and machine learning",
-            "storing and organizing data",
-            "understanding human language with computers"
+            "programming",
+            "artificial intelligence",
+            "database",
+            "language"
         ]
         
-        for query in test_queries:
-            print(f"🔍 Query: '{query}'")
-            
-            results = await search_documents(query, top_n=2)
-            
-            print(f"   Found {len(results)} similar documents:")
-            for i, doc in enumerate(results, 1):
-                preview = doc[:80] + "..." if len(doc) > 80 else doc
-                print(f"   {i}. {preview}")
-            print()
-            
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            for query in test_queries:
+                print(f"🔍 Query: '{query}'")
+                
+                # Use PostgreSQL full-text search
+                search_sql = """
+                    SELECT title, content,
+                           ts_rank(to_tsvector('english', title || ' ' || content), 
+                                  plainto_tsquery('english', %s)) as rank
+                    FROM documents 
+                    WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', %s)
+                    ORDER BY rank DESC
+                    LIMIT 2;
+                """
+                
+                cursor.execute(search_sql, (query, query))
+                results = cursor.fetchall()
+                
+                print(f"   Found {len(results)} relevant documents:")
+                for i, doc in enumerate(results, 1):
+                    preview = doc['content'][:80] + "..." if len(doc['content']) > 80 else doc['content']
+                    print(f"   {i}. {doc['title']}: {preview}")
+                print()
+        
+        conn.close()
+        
     except Exception as e:
         print(f"❌ Document search test failed: {e}")
 

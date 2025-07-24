@@ -26,12 +26,26 @@ pip install streamlit flask flask-cors plotly pandas psycopg2-binary aiohttp
 ```
 
 ### 3. Launch Interfaces
+
+#### 🚀 Quick Start (Recommended)
+```bash
+# One-click launcher with dependency checks
+python run_app.py
+```
+
+#### 🔧 Manual Launch
 ```bash
 # Streamlit Pro App (Main Interface)
-streamlit run app_pro.py --port 8502
+streamlit run app_pro.py --server.port 8502
 
 # Flask API + Web Interface
 python flask_api.py
+```
+
+#### 📦 All Services at Once
+```bash
+# Start everything with one command
+./start_all.sh
 ```
 
 ### 4. Access Your AI Assistant
@@ -293,7 +307,7 @@ python final_test.py
 #### Manual Start (Individual Services)
 ```bash
 # Option 1: Streamlit Pro (Main Interface)
-streamlit run app_pro.py --port 8502
+streamlit run app_pro.py --server.port 8502
 
 # Option 2: Flask API + Web Interface
 python flask_api.py

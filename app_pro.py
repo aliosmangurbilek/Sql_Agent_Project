@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Pagila AI Assistant Pro - Advanced Streamlit Interface
+Usage: streamlit run app_pro.py --port 8502
+"""
+
 import streamlit as st
 import asyncio
 import pandas as pd
@@ -7,7 +13,91 @@ from datetime import datetime, timedelta
 import json
 import os
 import time
+import sys
+import traceback
+import logging
 from typing import Dict, List, Any
+
+# Setup logging for debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Debug utility functions
+def log_debug(message: str, data: dict = None):
+    """Log debug information both to console and Streamlit"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_msg = f"[{timestamp}] {message}"
+    
+    if data:
+        log_msg += f" | Data: {data}"
+    
+    logger.info(log_msg)
+    
+    # Show in Streamlit debug expander if debug mode is enabled
+    if st.session_state.get('debug_mode', False):
+        with st.expander(f"🐛 Debug [{timestamp}]", expanded=False):
+            st.code(log_msg)
+            if data:
+                st.json(data)
+
+def show_error(error: Exception, context: str = ""):
+    """Display error information in a user-friendly way"""
+    error_type = type(error).__name__
+    error_msg = str(error)
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    # Log the error
+    logger.error(f"[{timestamp}] {context}: {error_type}: {error_msg}")
+    
+    # Show to user
+    st.error(f"❌ **Hata ({error_type})**: {error_msg}")
+    
+    # Show debug info if debug mode is on
+    if st.session_state.get('debug_mode', False):
+        with st.expander("🔍 Hata Detayları", expanded=False):
+            st.code(f"Hata Türü: {error_type}")
+            st.code(f"Mesaj: {error_msg}")
+            st.code(f"Konum: {context}")
+            
+            # Show full traceback
+            tb_str = traceback.format_exc()
+            st.code(tb_str, language="python")
+
+def check_environment():
+    """Check and display environment status"""
+    env_status = {}
+    
+    # Check database URL
+    db_url = os.getenv('DATABASE_URL')
+    env_status['database'] = {
+        'status': 'OK' if db_url else 'MISSING',
+        'value': db_url[:50] + '...' if db_url and len(db_url) > 50 else db_url
+    }
+    
+    # Check Ollama settings
+    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    ollama_embed = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
+    
+    env_status['ollama'] = {
+        'host': ollama_host,
+        'chat_model': ollama_model,
+        'embedding_model': ollama_embed
+    }
+    
+    log_debug("Environment check completed", env_status)
+    return env_status
+
+# Check if running with streamlit
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    if get_script_run_ctx() is None:
+        print("❌ Bu uygulama Streamlit ile çalıştırılmalıdır!")
+        print("✅ Doğru kullanım: streamlit run app_pro.py --port 8502")
+        sys.exit(1)
+except ImportError:
+    pass
+
 from schema_tools import ask_db, generate_final_answer
 
 # Sayfa yapılandırması
@@ -130,7 +220,7 @@ st.markdown("""
     }
     
     .query-history {
-        background: #f8f9fa;
+        background: black;
         padding: 1rem;
         border-radius: 8px;
         margin: 0.5rem 0;
@@ -240,28 +330,61 @@ st.markdown("""
 with st.sidebar:
     st.markdown('<div class="sidebar-header"><h3>🔧 Sistem Kontrol Paneli</h3></div>', unsafe_allow_html=True)
     
+    # Debug Mode Toggle
+    st.markdown("### 🐛 Debug Modu")
+    debug_mode = st.checkbox("Debug modu aktif", 
+                           value=st.session_state.get('debug_mode', False),
+                           help="Debug bilgileri ve detaylı hata mesajları gösterir")
+    st.session_state.debug_mode = debug_mode
+    
+    if debug_mode:
+        st.info("🔍 Debug modu aktif - Detaylı loglar gösterilecek")
+        
+        # Environment status
+        with st.expander("🌍 Environment Durumu", expanded=False):
+            env_status = check_environment()
+            
+            st.write("**Database:**")
+            st.code(f"Status: {env_status['database']['status']}")
+            st.code(f"URL: {env_status['database']['value']}")
+            
+            st.write("**Ollama:**")
+            st.code(f"Host: {env_status['ollama']['host']}")
+            st.code(f"Chat Model: {env_status['ollama']['chat_model']}")
+            st.code(f"Embed Model: {env_status['ollama']['embedding_model']}")
+        
+        # Clear debug logs button
+        if st.button("🗑️ Debug Logları Temizle"):
+            if 'debug_logs' in st.session_state:
+                st.session_state.debug_logs = []
+            st.success("Debug logları temizlendi")
+    
     setup_environment()
     
     # Sistem durumu
     with st.spinner("Sistem kontrol ediliyor..."):
         try:
+            log_debug("Database connection test starting")
             test_result = run_async(ask_db("SELECT COUNT(*) as total_films FROM film LIMIT 1"))
             if test_result:
                 db_status = "online"
                 total_films = test_result[0]['total_films']
+                log_debug("Database test successful", {"total_films": total_films})
             else:
                 db_status = "offline"
                 total_films = "N/A"
-        except:
+                log_debug("Database test failed - no results")
+        except Exception as e:
             db_status = "offline"
             total_films = "N/A"
+            show_error(e, "Database connection test")
     
     # Durum göstergesi
     status_class = "status-online" if db_status == "online" else "status-offline"
     status_text = "🟢 Çevrimiçi" if db_status == "online" else "🔴 Çevrimdışı"
     
     st.markdown(f"""
-    <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px; margin: 1rem 0;">
+    <div style="padding: 1rem; background: grey; border-radius: 8px; margin: 1rem 0;">
         <h4>📊 Sistem Durumu</h4>
         <p><span class="status-indicator {status_class}"></span><strong>Veritabanı:</strong> {status_text}</p>
         <p>📽️ <strong>Toplam Film:</strong> {total_films}</p>
@@ -370,15 +493,26 @@ with tab1:
             if st.button("🚀 Çalıştır", type="primary", use_container_width=True):
                 if user_question.strip():
                     start_time = time.time()
+                    log_debug("Query execution started", {
+                        "question": user_question[:100],
+                        "query_type": query_type,
+                        "max_results": max_results
+                    })
                     
                     with st.spinner("🤖 AI çalışıyor..."):
                         try:
                             if query_type in ["🚀 Hızlı SQL", "📝 Hibrit Mod"]:
                                 # SQL sorgusu
+                                log_debug("Starting SQL query execution")
                                 result = run_async(ask_db(user_question))
                                 
                                 end_time = time.time()
                                 duration = end_time - start_time
+                                
+                                log_debug("SQL query completed", {
+                                    "result_count": len(result) if result else 0,
+                                    "duration": duration
+                                })
                                 
                                 if result:
                                     st.markdown(f"""
@@ -390,103 +524,134 @@ with tab1:
                                     """, unsafe_allow_html=True)
                                     
                                     # Sonuçları DataFrame'e çevir
-                                    df = pd.DataFrame(result)
+                                    try:
+                                        df = pd.DataFrame(result)
+                                        log_debug("DataFrame created successfully", {
+                                            "shape": df.shape,
+                                            "columns": list(df.columns)
+                                        })
+                                    except Exception as e:
+                                        show_error(e, "DataFrame creation")
+                                        df = pd.DataFrame()
                                     
                                     # Otomatik görselleştirme
                                     if auto_visualize and len(df.columns) >= 2 and len(df) <= 50:
-                                        # Grafik türünü belirle
-                                        numeric_cols = df.select_dtypes(include=['number']).columns
-                                        
-                                        if len(numeric_cols) >= 1:
-                                            # Bar chart
-                                            if len(df.columns) == 2:
-                                                fig = px.bar(
-                                                    df, 
-                                                    x=df.columns[0], 
-                                                    y=df.columns[1],
-                                                    title=f"📊 {user_question[:50]}...",
-                                                    color=df.columns[1],
-                                                    color_continuous_scale="viridis"
-                                                )
-                                            else:
-                                                # Pie chart kategorik veriler için
-                                                fig = px.pie(
-                                                    df.head(10), 
-                                                    values=numeric_cols[0], 
-                                                    names=df.columns[0],
-                                                    title=f"🥧 {user_question[:50]}..."
-                                                )
+                                        try:
+                                            log_debug("Starting auto visualization")
+                                            # Grafik türünü belirle
+                                            numeric_cols = df.select_dtypes(include=['number']).columns
                                             
-                                            fig.update_layout(height=400)
-                                            st.plotly_chart(fig, use_container_width=True)
+                                            if len(numeric_cols) >= 1:
+                                                # Bar chart
+                                                if len(df.columns) == 2:
+                                                    fig = px.bar(
+                                                        df, 
+                                                        x=df.columns[0], 
+                                                        y=df.columns[1],
+                                                        title=f"📊 {user_question[:50]}...",
+                                                        color=df.columns[1],
+                                                        color_continuous_scale="viridis"
+                                                    )
+                                                else:
+                                                    # Pie chart kategorik veriler için
+                                                    fig = px.pie(
+                                                        df.head(10), 
+                                                        values=numeric_cols[0], 
+                                                        names=df.columns[0],
+                                                        title=f"🥧 {user_question[:50]}..."
+                                                    )
+                                                
+                                                fig.update_layout(height=400)
+                                                st.plotly_chart(fig, use_container_width=True)
+                                                log_debug("Visualization created successfully")
+                                        except Exception as e:
+                                            show_error(e, "Auto visualization")
                                     
                                     # Veri tablosu
-                                    st.dataframe(
-                                        df.head(max_results), 
-                                        use_container_width=True, 
-                                        height=min(400, len(df) * 35 + 50)
-                                    )
+                                    try:
+                                        st.dataframe(
+                                            df.head(max_results), 
+                                            use_container_width=True, 
+                                            height=min(400, len(df) * 35 + 50)
+                                        )
+                                        log_debug("Data table displayed successfully")
+                                    except Exception as e:
+                                        show_error(e, "Data table display")
                                     
                                     # İndirme seçenekleri
-                                    col_dl1, col_dl2, col_dl3 = st.columns(3)
-                                    
-                                    with col_dl1:
-                                        csv = df.to_csv(index=False)
-                                        st.download_button(
-                                            "📥 CSV İndir",
-                                            csv,
-                                            f"pagila_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                            "text/csv",
-                                            use_container_width=True
-                                        )
-                                    
-                                    with col_dl2:
-                                        json_data = df.to_json(orient='records', indent=2)
-                                        st.download_button(
-                                            "📋 JSON İndir",
-                                            json_data,
-                                            f"pagila_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                            "application/json",
-                                            use_container_width=True
-                                        )
+                                    try:
+                                        col_dl1, col_dl2, col_dl3 = st.columns(3)
+                                        
+                                        with col_dl1:
+                                            csv = df.to_csv(index=False)
+                                            st.download_button(
+                                                "📥 CSV İndir",
+                                                csv,
+                                                f"pagila_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                                "text/csv",
+                                                use_container_width=True
+                                            )
+                                        
+                                        with col_dl2:
+                                            json_data = df.to_json(orient='records', indent=2)
+                                            st.download_button(
+                                                "📋 JSON İndir",
+                                                json_data,
+                                                f"pagila_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                                                "application/json",
+                                                use_container_width=True
+                                            )
+                                        log_debug("Download options created successfully")
+                                    except Exception as e:
+                                        show_error(e, "Download options")
                                     
                                     add_to_history(user_question, "SQL", duration, True)
                                     
                                 else:
                                     st.warning("⚠️ Sonuç bulunamadı")
+                                    log_debug("No results found for SQL query")
                                     add_to_history(user_question, "SQL", duration, False)
                             
                             # AI analizi (hibrit modda da çalışır)
                             if query_type in ["🤖 AI Analizi", "📝 Hibrit Mod"]:
-                                if query_type == "📝 Hibrit Mod":
-                                    st.markdown("---")
-                                    st.markdown("### 🤖 AI Detaylı Analizi")
-                                
-                                start_ai = time.time()
-                                answer = run_async(generate_final_answer(user_question))
-                                end_ai = time.time()
-                                ai_duration = end_ai - start_ai
-                                
-                                st.markdown(f"""
-                                <div class="result-card">
-                                    <h4>🤖 AI Analizi Tamamlandı</h4>
-                                    <p><strong>⏱️ AI Süre:</strong> {ai_duration:.2f} saniye</p>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                st.markdown(answer)
-                                add_to_history(user_question, "AI", ai_duration, True)
-                        
+                                try:
+                                    if query_type == "📝 Hibrit Mod":
+                                        st.markdown("---")
+                                        st.markdown("### 🤖 AI Detaylı Analizi")
+                                    
+                                    log_debug("Starting AI analysis")
+                                    start_ai = time.time()
+                                    answer = run_async(generate_final_answer(user_question))
+                                    end_ai = time.time()
+                                    ai_duration = end_ai - start_ai
+                                    
+                                    log_debug("AI analysis completed", {
+                                        "ai_duration": ai_duration,
+                                        "answer_length": len(answer) if answer else 0
+                                    })
+                                    
+                                    st.markdown(f"""
+                                    <div class="result-card">
+                                        <h4>🤖 AI Analizi Tamamlandı</h4>
+                                        <p><strong>⏱️ AI Süre:</strong> {ai_duration:.2f} saniye</p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    
+                                    if answer:
+                                        st.markdown(answer)
+                                        add_to_history(user_question, "AI", ai_duration, True)
+                                    else:
+                                        st.warning("⚠️ AI analizi sonuç üretemedi")
+                                        add_to_history(user_question, "AI", ai_duration, False)
+                                        
+                                except Exception as e:
+                                    show_error(e, "AI Analysis")
+                                    
                         except Exception as e:
-                            duration = time.time() - start_time
-                            st.markdown(f"""
-                            <div class="error-card">
-                                <h4>❌ Hata Oluştu</h4>
-                                <p><strong>Hata:</strong> {str(e)}</p>
-                                <p><strong>Süre:</strong> {duration:.2f} saniye</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            add_to_history(user_question, "Hata", duration, False)
+                            show_error(e, "Query execution")
+                            end_time = time.time()
+                            duration = end_time - start_time
+                            add_to_history(user_question, query_type, duration, False)
                 else:
                     st.warning("⚠️ Lütfen bir soru girin.")
         

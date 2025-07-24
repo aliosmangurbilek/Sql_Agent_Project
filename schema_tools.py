@@ -10,6 +10,37 @@ import json
 import aiohttp
 
 
+async def get_embedding(text: str) -> list:
+    """Generate embedding for text using Ollama."""
+    
+    try:
+        base_url = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
+        model = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
+        
+        print(f"🔗 Connecting to {base_url} with model {model}")
+        
+        async with aiohttp.ClientSession() as session:
+            embed_url = f"{base_url}/api/embeddings"
+            payload = {
+                "model": model,
+                "prompt": text
+            }
+            
+            async with session.post(embed_url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    embedding = result.get('embedding', [])
+                    print(f"✅ Generated embedding with {len(embedding)} dimensions")
+                    return embedding
+                else:
+                    print(f"❌ Embedding API error: {response.status}")
+                    return []
+                    
+    except Exception as e:
+        print(f"❌ Error generating embedding: {e}")
+        return []
+
+
 class SQLValidationError(Exception):
     """Base exception for SQL validation errors."""
     pass
@@ -358,91 +389,121 @@ async def ask_db(question: str) -> list[dict]:
     return result_rows
 
 
-async def search_documents(query: str, top_n: int = 3) -> list[str]:
+async def search_documents(query: str, top_n: int = 3) -> list[dict]:
     """
-    Search for similar documents using Ollama embeddings and PostgreSQL vector similarity.
+    Search for similar documents using vector similarity (pgvector) with text search fallback.
     
-    This function:
-    1. Uses Ollama's /api/embeddings to convert the query into a vector
-    2. Queries PostgreSQL database to find top N most similar documents
-    3. Returns a list of the top N document contents
-    
-    Prerequisites:
-    - PostgreSQL with pgvector extension installed
-    - A table with vector embeddings (e.g., 'documents' table with 'content' and 'embedding' columns)
-    - Ollama running locally with an embedding model
+    This function first tries to use vector similarity search with embeddings.
+    If that fails or no embeddings are available, it falls back to PostgreSQL full-text search.
     
     Environment Variables:
         DATABASE_URL (required): PostgreSQL connection string
-        OLLAMA_HOST (optional): Ollama server URL (default: http://localhost:11434)
-        OLLAMA_EMBEDDING_MODEL (optional): Embedding model (default: mxbai-embed-large)
+        OLLAMA_BASE_URL (optional): Ollama API base URL
+        OLLAMA_EMBEDDING_MODEL (optional): Embedding model name
         DOCUMENTS_TABLE (optional): Table name (default: documents)
         CONTENT_COLUMN (optional): Content column name (default: content)
-        EMBEDDING_COLUMN (optional): Embedding column name (default: embedding)
     
     Args:
         query: The search query string
         top_n: Number of top similar documents to return (default: 3)
         
     Returns:
-        A list of strings containing the top N most similar document contents
-        
-    Raises:
-        ValueError: If required environment variables are missing
-        Exception: If Ollama API call fails or database query fails
+        A list of dictionaries containing title and content of most similar documents
         
     Example:
-        # Set up environment
-        export DATABASE_URL='postgresql://postgres:2336@localhost:5432/pagila'
-        export OLLAMA_EMBEDDING_MODEL='mxbai-embed-large'
-        
-        # Use the function
-        results = await search_documents("machine learning algorithms", top_n=5)
+        results = await search_documents("machine learning", top_n=5)
         for doc in results:
-            print(doc[:100] + "...")
+            print(f"{doc['title']}: {doc['content'][:100]}...")
     """
     # Check for required environment variables
     database_url = os.getenv('DATABASE_URL')
-    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-    embedding_model = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
     table_name = os.getenv('DOCUMENTS_TABLE', 'documents')
     content_column = os.getenv('CONTENT_COLUMN', 'content')
-    embedding_column = os.getenv('EMBEDDING_COLUMN', 'embedding')
+    title_column = os.getenv('TITLE_COLUMN', 'title')
     
     if not database_url:
-        raise ValueError("DATABASE_URL environment variable is required")
+        # Setup environment if not set
+        os.environ["DATABASE_URL"] = "postgresql://postgres:2336@localhost:5432/pagila"
+        os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
+        os.environ["OLLAMA_EMBEDDING_MODEL"] = "mxbai-embed-large"
+        database_url = os.environ["DATABASE_URL"]
     
-    # Step 1: Use Ollama's /api/embeddings to convert query into vector
-    ollama_payload = {
-        "model": embedding_model,
-        "prompt": query
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ollama_host}/api/embeddings",
-                json=ollama_payload,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"Ollama embeddings API returned {response.status}: {error_text}")
-                
-                embedding_response = await response.json()
-                query_embedding = embedding_response.get('embedding')
-                
-                if not query_embedding:
-                    raise Exception("Ollama did not return an embedding")
-                    
-    except aiohttp.ClientError as e:
-        raise Exception(f"Failed to connect to Ollama at {ollama_host}: {e}")
-    except Exception as e:
-        raise Exception(f"Ollama embeddings API call failed: {e}")
-    
-    # Step 2: Query PostgreSQL database for top N most similar documents
-    def search_similar_documents():
+    # Try vector search first
+    async def search_vector_documents():
         try:
+            # Generate embedding for query
+            print(f"🧠 Generating embedding for query: '{query[:50]}...'")
+            query_embedding = await get_embedding(query)
+            
+            if not query_embedding:
+                print("⚠️  No query embedding generated, falling back to text search")
+                return None
+                
+            # Connect to database
+            conn_params = psycopg2.extensions.parse_dsn(database_url)
+            conn_params.update({
+                'options': '-c default_transaction_read_only=on -c statement_timeout=10000'
+            })
+            
+            conn = psycopg2.connect(**conn_params)
+            
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                # Check if we have embeddings in the table
+                cursor.execute(f"SELECT COUNT(*) as embedding_count FROM {table_name} WHERE embedding IS NOT NULL;")
+                embedding_count = cursor.fetchone()['embedding_count']
+                
+                if embedding_count == 0:
+                    print("⚠️  No document embeddings found, falling back to text search")
+                    conn.close()
+                    return None
+                
+                print(f"🔍 Using vector search on {embedding_count} embedded documents")
+                
+                # Convert query embedding to pgvector format
+                embedding_str = f"[{','.join(map(str, query_embedding))}]"
+                print(f"🔢 Query embedding vector length: {len(query_embedding)}")
+                print(f"🔢 Query embedding sample: {query_embedding[:5]}...")
+                
+                # Vector similarity search using cosine distance
+                vector_sql = f"""
+                    SELECT {content_column},
+                           COALESCE({title_column}, '') as title,
+                           1 - (embedding <=> %s::vector) as similarity
+                    FROM {table_name} 
+                    WHERE embedding IS NOT NULL
+                    ORDER BY similarity DESC
+                    LIMIT %s;
+                """
+                
+                print(f"🔍 Executing vector search SQL...")
+                print(f"📝 SQL: {vector_sql}")
+                try:
+                    cursor.execute(vector_sql, (embedding_str, top_n))
+                    results = cursor.fetchall()
+                    print(f"🔍 Vector search returned {len(results) if results else 0} rows")
+                except Exception as sql_error:
+                    print(f"❌ SQL execution error: {sql_error}")
+                    raise sql_error
+                
+                conn.close()
+                
+                if results:
+                    print(f"✅ Vector search found {len(results)} results")
+                    return [{"title": row["title"], "content": row[content_column]} for row in results]
+                else:
+                    print("⚠️  Vector search returned no results, falling back to text search")
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ Vector search error: {e}")
+            print("⚠️  Falling back to text search")
+            return None
+    
+    # Text search fallback
+    def search_text_documents():
+        try:
+            print(f"📝 Using text search for query: '{query[:50]}...'")
+            
             # Connect to database with read-only settings
             conn_params = psycopg2.extensions.parse_dsn(database_url)
             conn_params.update({
@@ -451,40 +512,41 @@ async def search_documents(query: str, top_n: int = 3) -> list[str]:
             
             conn = psycopg2.connect(**conn_params)
             
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    # Convert Python list to PostgreSQL vector format
-                    vector_str = '[' + ','.join(map(str, query_embedding)) + ']'
-                    
-                    # SQL query to find most similar documents using cosine similarity
-                    # Note: This assumes pgvector extension is installed and the embedding column is of type vector
-                    similarity_query = f"""
-                        SELECT {content_column},
-                               1 - ({embedding_column} <=> %s::vector) AS similarity
-                        FROM {table_name}
-                        WHERE {embedding_column} IS NOT NULL
-                        ORDER BY {embedding_column} <=> %s::vector
-                        LIMIT %s;
-                    """
-                    
-                    cursor.execute(similarity_query, (vector_str, vector_str, top_n))
-                    rows = cursor.fetchall()
-                    
-                    # Extract just the content from the results
-                    return [row[content_column] for row in rows]
-                    
-            finally:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                # Use PostgreSQL full-text search
+                search_sql = f"""
+                    SELECT {content_column},
+                           COALESCE({title_column}, '') as title,
+                           ts_rank(to_tsvector('english', COALESCE({title_column}, '') || ' ' || {content_column}), 
+                                  plainto_tsquery('english', %s)) as rank
+                    FROM {table_name} 
+                    WHERE to_tsvector('english', COALESCE({title_column}, '') || ' ' || {content_column}) @@ plainto_tsquery('english', %s)
+                    ORDER BY rank DESC
+                    LIMIT %s;
+                """
+                
+                cursor.execute(search_sql, (query, query, top_n))
+                results = cursor.fetchall()
+                
                 conn.close()
                 
-        except psycopg2.Error as e:
-            raise Exception(f"Database search failed: {e}")
+                if results:
+                    print(f"✅ Text search found {len(results)} results")
+                    return [{"title": row["title"], "content": row[content_column]} for row in results]
+                else:
+                    print(f"❌ No documents found matching '{query}'")
+                    return []
+                    
         except Exception as e:
-            raise Exception(f"Document search failed: {e}")
+            print(f"❌ Text search error: {e}")
+            return []
     
-    # Step 3: Execute database search using asyncio.to_thread
-    similar_documents = await asyncio.to_thread(search_similar_documents)
-    
-    return similar_documents
+    # Try vector search first, fall back to text search
+    vector_results = await search_vector_documents()
+    if vector_results is not None:
+        return vector_results
+    else:
+        return search_text_documents()
 
 
 async def summarize_rows(rows: list[dict], question: str) -> str:

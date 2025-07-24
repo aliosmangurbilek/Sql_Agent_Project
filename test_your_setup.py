@@ -6,9 +6,21 @@ Complete test for all schema_tools functions with your local Ollama setup.
 import asyncio
 import os
 
+def setup_environment():
+    """Set up environment variables for consistent operation"""
+    os.environ["DATABASE_URL"] = "postgresql://postgres:2336@localhost:5432/pagila"
+    os.environ["CHAT_MODEL"] = "mistral:7b-instruct"
+    os.environ["EMBED_MODEL"] = "mxbai-embed-large"
+    os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
+    os.environ["OLLAMA_HOST"] = "http://localhost:11434"
+    os.environ["OLLAMA_MODEL"] = "mistral:7b-instruct"
+    os.environ["OLLAMA_EMBEDDING_MODEL"] = "mxbai-embed-large"
 
 async def main():
     """Main test function."""
+    
+    # Setup environment first
+    setup_environment()
     
     print("=== Complete Ollama Integration Test ===\n")
     
