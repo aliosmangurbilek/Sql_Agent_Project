@@ -95,7 +95,7 @@ GEMINI_MODEL=gemini-pro
 OPENROUTER_MODEL=deepseek/deepseek-chat-v3-0324:free
 
 # Database Configuration
-DATABASE_URL=postgresql://postgres:2336@localhost:5432/pagila
+DATABASE_URL=postgresql://your-user-name:your-password@localhost:5432/pagila
 ```
 
 ### Database Setup
