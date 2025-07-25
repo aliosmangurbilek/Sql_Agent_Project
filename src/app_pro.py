@@ -16,7 +16,24 @@ import time
 import sys
 import traceback
 import logging
+import re
 from typing import Dict, List, Any
+from pathlib import Path
+
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    # Look for .env in config directory (parent directory)
+    env_path = Path(__file__).parent.parent / "config" / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✅ Loaded environment from {env_path}")
+    else:
+        # Fallback to current directory
+        load_dotenv()
+        print("✅ Loaded environment from current directory")
+except ImportError:
+    print("⚠️ python-dotenv not found, environment variables may not load properly")
 
 # Setup logging for debugging
 logging.basicConfig(level=logging.INFO)
@@ -74,16 +91,65 @@ def check_environment():
         'value': db_url[:50] + '...' if db_url and len(db_url) > 50 else db_url
     }
     
-    # Check Ollama settings
-    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
-    ollama_embed = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
+    # Check AI provider using new AI_PROVIDER system
+    ai_provider = os.getenv('AI_PROVIDER', 'ollama').lower()
     
-    env_status['ollama'] = {
-        'host': ollama_host,
-        'chat_model': ollama_model,
-        'embedding_model': ollama_embed
-    }
+    if ai_provider == 'openai':
+        # OpenAI settings
+        openai_key = os.getenv('OPENAI_API_KEY')
+        openai_model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+        
+        env_status['ai_provider'] = {
+            'type': 'OpenAI',
+            'api_key': 'SET' if openai_key else 'MISSING',
+            'model': openai_model,
+            'provider': ai_provider
+        }
+    
+    elif ai_provider == 'gemini':
+        # Gemini settings
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        gemini_model = os.getenv('GEMINI_MODEL', 'gemini-pro')
+        
+        env_status['ai_provider'] = {
+            'type': 'Google Gemini',
+            'api_key': 'SET' if gemini_key else 'MISSING',
+            'model': gemini_model,
+            'provider': ai_provider
+        }
+    
+    elif ai_provider == 'openrouter':
+        # OpenRouter settings
+        openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        openrouter_model = os.getenv('OPENROUTER_MODEL', 'meta-llama/llama-3.1-8b-instruct:free')
+        
+        env_status['ai_provider'] = {
+            'type': 'OpenRouter',
+            'api_key': 'SET' if openrouter_key else 'MISSING',
+            'model': openrouter_model,
+            'provider': ai_provider
+        }
+    
+    elif ai_provider == 'ollama':
+        # Ollama settings
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+        ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+        ollama_embed = os.getenv('OLLAMA_EMBEDDING_MODEL', 'mxbai-embed-large')
+        
+        env_status['ai_provider'] = {
+            'type': 'Ollama (Local)',
+            'host': ollama_host,
+            'chat_model': ollama_model,
+            'embedding_model': ollama_embed,
+            'provider': ai_provider
+        }
+    
+    else:
+        env_status['ai_provider'] = {
+            'type': 'UNKNOWN',
+            'status': f'Unknown AI provider: {ai_provider}',
+            'provider': ai_provider
+        }
     
     log_debug("Environment check completed", env_status)
     return env_status
@@ -93,7 +159,7 @@ try:
     from streamlit.runtime.scriptrunner import get_script_run_ctx
     if get_script_run_ctx() is None:
         print("❌ Bu uygulama Streamlit ile çalıştırılmalıdır!")
-        print("✅ Doğru kullanım: streamlit run app_pro.py --port 8502")
+        print("✅ Doğru kullanım: streamlit run src/app_pro.py --port 8502")
         sys.exit(1)
 except ImportError:
     pass
@@ -248,11 +314,29 @@ if 'performance_stats' not in st.session_state:
     st.session_state.performance_stats = {'total_queries': 0, 'avg_response_time': 0, 'success_rate': 100}
 
 def setup_environment():
-    """Çevre değişkenlerini ayarla"""
-    os.environ["DATABASE_URL"] = "postgresql://postgres:2336@localhost:5432/pagila"
-    os.environ["CHAT_MODEL"] = "mistral:7b-instruct"
-    os.environ["EMBED_MODEL"] = "mxbai-embed-large"
-    os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
+    """Set up environment variables, respecting .env configuration"""
+    # Database configuration
+    if not os.getenv('DATABASE_URL'):
+        os.environ["DATABASE_URL"] = "postgresql://postgres:2336@localhost:5432/pagila"
+    
+    # AI Provider is already loaded from .env file via load_dotenv()
+    # Just ensure some defaults are set if not present
+    ai_provider = os.getenv('AI_PROVIDER', 'ollama').lower()
+    
+    if ai_provider == 'ollama':
+        # Ensure Ollama defaults are set
+        os.environ.setdefault("OLLAMA_HOST", "http://localhost:11434")
+        os.environ.setdefault("OLLAMA_MODEL", "mistral:7b-instruct")
+        os.environ.setdefault("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large")
+    elif ai_provider == 'openai':
+        # Ensure OpenAI defaults are set
+        os.environ.setdefault("OPENAI_MODEL", "gpt-4o-mini")
+    elif ai_provider == 'gemini':
+        # Ensure Gemini defaults are set
+        os.environ.setdefault("GEMINI_MODEL", "gemini-pro")
+    elif ai_provider == 'openrouter':
+        # Ensure OpenRouter defaults are set
+        os.environ.setdefault("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
 
 def run_async(coro):
     """Async fonksiyonu senkron ortamda çalıştır"""
@@ -348,10 +432,25 @@ with st.sidebar:
             st.code(f"Status: {env_status['database']['status']}")
             st.code(f"URL: {env_status['database']['value']}")
             
-            st.write("**Ollama:**")
-            st.code(f"Host: {env_status['ollama']['host']}")
-            st.code(f"Chat Model: {env_status['ollama']['chat_model']}")
-            st.code(f"Embed Model: {env_status['ollama']['embedding_model']}")
+            st.write("**AI Provider:**")
+            ai_provider = env_status['ai_provider']
+            st.code(f"Type: {ai_provider['type']}")
+            
+            if ai_provider['type'] == 'OpenAI':
+                st.code(f"API Key: {ai_provider['api_key']}")
+                st.code(f"Model: {ai_provider['model']}")
+            elif ai_provider['type'] == 'Google Gemini':
+                st.code(f"API Key: {ai_provider['api_key']}")
+                st.code(f"Model: {ai_provider['model']}")
+            elif ai_provider['type'] == 'OpenRouter':
+                st.code(f"API Key: {ai_provider['api_key']}")
+                st.code(f"Model: {ai_provider['model']}")
+            elif ai_provider['type'] == 'Ollama (Local)':
+                st.code(f"Host: {ai_provider['host']}")
+                st.code(f"Chat Model: {ai_provider['chat_model']}")
+                st.code(f"Embed Model: {ai_provider['embedding_model']}")
+            else:
+                st.code(f"Status: {ai_provider.get('status', 'Unknown configuration')}")
         
         # Clear debug logs button
         if st.button("🗑️ Debug Logları Temizle"):
@@ -361,19 +460,251 @@ with st.sidebar:
     
     setup_environment()
     
+    # AI Provider Selection
+    st.markdown("### 🤖 AI Provider")
+    
+    # Current provider status
+    current_provider = os.getenv('AI_PROVIDER', 'ollama').lower()
+    
+    # Provider status display
+    if current_provider == 'openai':
+        st.success("✅ Using OpenAI GPT for SQL generation")
+        if not os.getenv('OPENAI_API_KEY'):
+            st.error("❌ OPENAI_API_KEY not set!")
+            st.code("Set OPENAI_API_KEY in .env file")
+    elif current_provider == 'gemini':
+        st.success("✅ Using Google Gemini for SQL generation")
+        if not os.getenv('GEMINI_API_KEY'):
+            st.error("❌ GEMINI_API_KEY not set!")
+            st.code("Set GEMINI_API_KEY in .env file")
+    elif current_provider == 'openrouter':
+        st.success("✅ Using OpenRouter for SQL generation")
+        if not os.getenv('OPENROUTER_API_KEY'):
+            st.error("❌ OPENROUTER_API_KEY not set!")
+            st.code("Set OPENROUTER_API_KEY in .env file")
+    elif current_provider == 'ollama':
+        st.info("🦙 Using Ollama for SQL generation")
+    else:
+        st.warning(f"⚠️ Unknown AI provider: {current_provider}")
+    
+    # Provider switching
+    with st.expander("🔧 Change AI Provider", expanded=False):
+        provider_options = [
+            "Ollama (Local, Free)",
+            "OpenAI GPT (API Key Required)",
+            "Google Gemini (API Key Required)",
+            "OpenRouter (Multiple Models, API Key Required)"
+        ]
+        
+        # Map current provider to index
+        provider_index = 0  # default to Ollama
+        if current_provider == 'openai':
+            provider_index = 1
+        elif current_provider == 'gemini':
+            provider_index = 2
+        elif current_provider == 'openrouter':
+            provider_index = 3
+        
+        provider_choice = st.radio(
+            "Select AI Provider:",
+            provider_options,
+            index=provider_index
+        )
+        
+        # Provider-specific configuration
+        if provider_choice == "OpenAI GPT (API Key Required)":
+            st.info("💡 OpenAI GPT provides reliable SQL generation")
+            api_key_input = st.text_input(
+                "OpenAI API Key:", 
+                type="password",
+                placeholder="sk-...",
+                value=os.getenv('OPENAI_API_KEY', '')
+            )
+            
+            model_choice = st.selectbox(
+                "Model:",
+                ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o-mini"],
+                index=3 if os.getenv('OPENAI_MODEL') == 'gpt-4o-mini' else 0
+            )
+            
+            if st.button("🔄 Switch to OpenAI"):
+                if api_key_input:
+                    # Update .env file
+                    env_path = Path(__file__).parent.parent / "config" / ".env"
+                    with open(env_path, 'r') as f:
+                        content = f.read()
+                    
+                    # Update AI_PROVIDER
+                    content = re.sub(r'AI_PROVIDER=.*', 'AI_PROVIDER=openai', content)
+                    # Update API key if provided
+                    if api_key_input != os.getenv('OPENAI_API_KEY', ''):
+                        content = re.sub(r'OPENAI_API_KEY=.*', f'OPENAI_API_KEY={api_key_input}', content)
+                    # Update model
+                    content = re.sub(r'OPENAI_MODEL=.*', f'OPENAI_MODEL={model_choice}', content)
+                    
+                    with open(env_path, 'w') as f:
+                        f.write(content)
+                    
+                    st.success("✅ Switched to OpenAI! Please refresh the page.")
+                    st.rerun()
+                else:
+                    st.error("Please enter your OpenAI API key")
+                    
+        elif provider_choice == "Google Gemini (API Key Required)":
+            st.info("🔮 Google Gemini provides advanced AI capabilities")
+            api_key_input = st.text_input(
+                "Gemini API Key:", 
+                type="password",
+                placeholder="AIza...",
+                value=os.getenv('GEMINI_API_KEY', '')
+            )
+            
+            model_choice = st.selectbox(
+                "Model:",
+                ["gemini-pro", "gemini-pro-vision", "gemini-1.5-pro"],
+                index=0
+            )
+            
+            if st.button("🔄 Switch to Gemini"):
+                if api_key_input:
+                    # Update .env file
+                    env_path = Path(__file__).parent.parent / "config" / ".env"
+                    with open(env_path, 'r') as f:
+                        content = f.read()
+                    
+                    content = re.sub(r'AI_PROVIDER=.*', 'AI_PROVIDER=gemini', content)
+                    if api_key_input != os.getenv('GEMINI_API_KEY', ''):
+                        content = re.sub(r'GEMINI_API_KEY=.*', f'GEMINI_API_KEY={api_key_input}', content)
+                    content = re.sub(r'GEMINI_MODEL=.*', f'GEMINI_MODEL={model_choice}', content)
+                    
+                    with open(env_path, 'w') as f:
+                        f.write(content)
+                    
+                    st.success("✅ Switched to Gemini! Please refresh the page.")
+                    st.rerun()
+                else:
+                    st.error("Please enter your Gemini API key")
+                    
+        elif provider_choice == "OpenRouter (Multiple Models, API Key Required)":
+            st.info("🌐 OpenRouter provides access to multiple AI models")
+            api_key_input = st.text_input(
+                "OpenRouter API Key:", 
+                type="password",
+                placeholder="sk-or-v1-...",
+                value=os.getenv('OPENROUTER_API_KEY', '')
+            )
+            
+            st.markdown("**Available Models:**")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**🆓 Free Models:**")
+                free_models = [
+                    "meta-llama/llama-3.1-8b-instruct:free",
+                    "deepseek/deepseek-chat-v3-0324:free",
+                    "microsoft/phi-3-mini-128k-instruct:free"
+                ]
+                for model in free_models:
+                    st.code(model)
+            
+            with col2:
+                st.markdown("**💎 Premium Models:**")
+                premium_models = [
+                    "openai/gpt-4-turbo",
+                    "anthropic/claude-3.5-sonnet",
+                    "google/gemini-pro-1.5"
+                ]
+                for model in premium_models:
+                    st.code(model)
+            
+            current_model = os.getenv('OPENROUTER_MODEL', 'deepseek/deepseek-chat-v3-0324:free')
+            model_choice = st.text_input(
+                "Model:",
+                value=current_model,
+                placeholder="deepseek/deepseek-chat-v3-0324:free"
+            )
+            
+            if st.button("🔄 Switch to OpenRouter"):
+                if api_key_input:
+                    # Update .env file
+                    env_path = Path(__file__).parent.parent / "config" / ".env"
+                    with open(env_path, 'r') as f:
+                        content = f.read()
+                    
+                    content = re.sub(r'AI_PROVIDER=.*', 'AI_PROVIDER=openrouter', content)
+                    if api_key_input != os.getenv('OPENROUTER_API_KEY', ''):
+                        content = re.sub(r'OPENROUTER_API_KEY=.*', f'OPENROUTER_API_KEY={api_key_input}', content)
+                    content = re.sub(r'OPENROUTER_MODEL=.*', f'OPENROUTER_MODEL={model_choice}', content)
+                    
+                    with open(env_path, 'w') as f:
+                        f.write(content)
+                    
+                    st.success("✅ Switched to OpenRouter! Please refresh the page.")
+                    st.rerun()
+                else:
+                    st.error("Please enter your OpenRouter API key")
+                    
+        else:  # Ollama
+            st.info("🆓 Ollama is free but requires local installation")
+            
+            ollama_host = st.text_input(
+                "Ollama Host:",
+                value=os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+            )
+            
+            model_choice = st.selectbox(
+                "Model:",
+                ["mistral:7b-instruct", "llama2", "codellama", "phi"],
+                index=0
+            )
+            
+            if st.button("🔄 Switch to Ollama"):
+                # Update .env file
+                env_path = Path(__file__).parent.parent / "config" / ".env"
+                with open(env_path, 'r') as f:
+                    content = f.read()
+                
+                content = re.sub(r'AI_PROVIDER=.*', 'AI_PROVIDER=ollama', content)
+                content = re.sub(r'OLLAMA_HOST=.*', f'OLLAMA_HOST={ollama_host}', content)
+                content = re.sub(r'OLLAMA_MODEL=.*', f'OLLAMA_MODEL={model_choice}', content)
+                
+                with open(env_path, 'w') as f:
+                    f.write(content)
+                
+                st.success("✅ Switched to Ollama! Please refresh the page.")
+                st.rerun()
+    
+    st.markdown("---")
     # Sistem durumu
     with st.spinner("Sistem kontrol ediliyor..."):
         try:
             log_debug("Database connection test starting")
-            test_result = run_async(ask_db("SELECT COUNT(*) as total_films FROM film LIMIT 1"))
-            if test_result:
-                db_status = "online"
-                total_films = test_result[0]['total_films']
-                log_debug("Database test successful", {"total_films": total_films})
-            else:
+            
+            # Only run AI test if we have proper provider configuration
+            ai_provider = os.getenv('AI_PROVIDER', 'ollama').lower()
+            
+            # Simple database test without AI
+            try:
+                import psycopg2
+                conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) as total_films FROM film LIMIT 1")
+                result = cursor.fetchone()
+                conn.close()
+                
+                if result:
+                    db_status = "online"
+                    total_films = result[0]
+                    log_debug("Database test successful", {"total_films": total_films})
+                else:
+                    db_status = "offline"
+                    total_films = "N/A"
+                    log_debug("Database test failed - no results")
+            except Exception as e:
                 db_status = "offline"
                 total_films = "N/A"
-                log_debug("Database test failed - no results")
+                log_debug("Database connection failed", {"error": str(e)})
+                
         except Exception as e:
             db_status = "offline"
             total_films = "N/A"
@@ -388,8 +719,8 @@ with st.sidebar:
         <h4>📊 Sistem Durumu</h4>
         <p><span class="status-indicator {status_class}"></span><strong>Veritabanı:</strong> {status_text}</p>
         <p>📽️ <strong>Toplam Film:</strong> {total_films}</p>
-        <p>🤖 <strong>AI Model:</strong> Mistral 7B</p>
-        <p>⚡ <strong>Platform:</strong> Ollama</p>
+        <p>🤖 <strong>AI Provider:</strong> {"OpenAI GPT" if os.getenv('USE_OPENAI', 'false').lower() == 'true' else "Ollama"}</p>
+        <p>⚡ <strong>Platform:</strong> {"OpenAI API" if os.getenv('USE_OPENAI', 'false').lower() == 'true' else "Ollama Local"}</p>
     </div>
     """, unsafe_allow_html=True)
     

@@ -8,6 +8,20 @@ import asyncio
 import os
 import json
 import aiohttp
+from openai import AsyncOpenAI
+import google.generativeai as genai
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file
+# Try to load from config directory first, then fall back to current directory
+env_path = Path(__file__).parent.parent / "config" / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+    print(f"✅ schema_tools: Loaded environment from {env_path}")
+else:
+    load_dotenv()
+    print("✅ schema_tools: Loaded environment from current directory")
 
 
 async def get_embedding(text: str) -> list:
@@ -180,17 +194,45 @@ def build_prompt(question: str, schema_dict: dict) -> tuple[list, list]:
     for table, columns in schema_dict.items():
         column_defs = ", ".join([f"{c['column']} {c['type']}" for c in columns])
         schema_lines.append(f"Table {table} ({column_defs})")
+    
+    # Add relationship information for better understanding
+    schema_lines.append("\n### Important Relationships ###")
+    schema_lines.append("- film_category.film_id → film.film_id")
+    schema_lines.append("- film_category.category_id → category.category_id")
+    schema_lines.append("- film_actor.film_id → film.film_id")
+    schema_lines.append("- film_actor.actor_id → actor.actor_id")
+    schema_lines.append("- rental.customer_id → customer.customer_id")
+    schema_lines.append("- rental.inventory_id → inventory.inventory_id")
+    schema_lines.append("- inventory.film_id → film.film_id")
+    schema_lines.append("- inventory.store_id → store.store_id")
+    
+    # Add common query patterns
+    schema_lines.append("\n### Common Query Examples ###")
+    schema_lines.append("-- For film categories by name:")
+    schema_lines.append("-- SELECT c.name, COUNT(*) FROM film f")
+    schema_lines.append("-- JOIN film_category fc ON f.film_id = fc.film_id")
+    schema_lines.append("-- JOIN category c ON fc.category_id = c.category_id")
+    schema_lines.append("-- GROUP BY c.name")
+    
     schema_text = "\n".join(schema_lines)
 
     prompt = f"""{schema_text}
 
 {question}
 
+IMPORTANT RULES:
+1. ALWAYS use proper JOINs when referencing related tables
+2. For category names, use: film → film_category → category (JOIN on IDs)
+3. For actor names, use: film → film_actor → actor (JOIN on IDs)
+4. film_category table only has film_id and category_id, NOT category name
+5. category table has category_id and name columns
+6. Use table aliases for cleaner queries
+
 You must use the generate_sql function to provide a PostgreSQL SELECT query that answers the question. 
 The query parameter must contain only the SQL query string.
-Example: {{"query": "SELECT title FROM film LIMIT 10"}}
+Example: {{"query": "SELECT c.name, COUNT(*) FROM film f JOIN film_category fc ON f.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id GROUP BY c.name ORDER BY COUNT(*) DESC"}}
 
-Use only the given schema tables. Generate a valid PostgreSQL SELECT query."""
+Use only the given schema tables. Generate a valid PostgreSQL SELECT query with proper JOINs."""
 
     messages = [{"role": "user", "content": prompt}]
 
@@ -218,14 +260,15 @@ Use only the given schema tables. Generate a valid PostgreSQL SELECT query."""
 
 async def ask_db(question: str) -> list[dict]:
     """
-    Asks the database a question by generating SQL via local Ollama and executing it safely.
+    Asks the database a question by generating SQL via OpenAI GPT and executing it safely.
     
-    This function connects to a local Ollama server via HTTP API (no Python ollama package needed).
+    This function uses OpenAI's GPT models with function calling for more reliable SQL generation.
     
     Environment Variables:
         DATABASE_URL (required): PostgreSQL connection string
-        OLLAMA_HOST (optional): Ollama server URL (default: http://localhost:11434)
-        OLLAMA_MODEL (optional): Model to use (default: mistral:7b-instruct)
+        OPENAI_API_KEY (required): OpenAI API key
+        OPENAI_MODEL (optional): Model to use (default: gpt-3.5-turbo)
+        USE_OLLAMA (optional): Set to 'true' to use Ollama instead of OpenAI
     
     Args:
         question: The natural language question to ask the database.
@@ -234,26 +277,40 @@ async def ask_db(question: str) -> list[dict]:
         A list of dictionaries representing the query results.
         
     Raises:
-        ValueError: If no database URL is configured.
+        ValueError: If no database URL or API key is configured.
         SQLValidationError: If the generated SQL is unsafe or invalid.
         psycopg2.Error: If database connection or execution fails.
-        Exception: If Ollama API call fails or returns unexpected format.
+        Exception: If OpenAI API call fails or returns unexpected format.
         
     Example:
         # Set up environment
         export DATABASE_URL='postgresql://postgres:2336@localhost:5432/pagila'
-        export OLLAMA_MODEL='mistral:7b-instruct'  # if you don't have mistral
-        
-        # Start Ollama (in another terminal)
-        ollama serve
+        export OPENAI_API_KEY='your-openai-api-key'
+        export OPENAI_MODEL='gpt-4'  # optional, defaults to gpt-3.5-turbo
         
         # Use the function
-        result = await ask_db("How many users are in the database?")
+        result = await ask_db("How many films are in the database?")
     """
     # Check for required environment variables
     database_url = os.getenv('DATABASE_URL')
-    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    ai_provider = os.getenv('AI_PROVIDER', 'ollama').lower()
+    
+    # Provider-specific configurations
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    openai_model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+    
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    gemini_model = os.getenv('GEMINI_MODEL', 'gemini-pro')
+    
+    openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+    openrouter_model = os.getenv('OPENROUTER_MODEL', 'meta-llama/llama-3.1-8b-instruct:free')
+    openrouter_site_url = os.getenv('OPENROUTER_SITE_URL', 'http://localhost:8501')
+    openrouter_app_name = os.getenv('OPENROUTER_APP_NAME', 'IGA_Staj_Project')
+    
+    # Legacy support for USE_OLLAMA
+    use_ollama = os.getenv('USE_OLLAMA', 'false').lower() == 'true'
+    if use_ollama and ai_provider == 'ollama':
+        ai_provider = 'ollama'
     
     if not database_url:
         raise ValueError("DATABASE_URL environment variable is required")
@@ -277,76 +334,32 @@ async def ask_db(question: str) -> list[dict]:
     # Step 2: Build prompt and functions via build_prompt
     messages, functions = build_prompt(question, schema_dict)
     
-    # Step 3: Call local Ollama via HTTP API
-    ollama_payload = {
-        "model": ollama_model,
-        "messages": messages,
-        "tools": functions,  # same schema as OpenAI functions
-        "options": {
-            "temperature": 0.0
-        },
-        "stream": False
-    }
+    # Step 3: Choose API based on AI_PROVIDER environment variable
+    if ai_provider == 'openai':
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required when AI_PROVIDER=openai")
+        generated_query = await _call_openai_api(messages, functions, openai_model, openai_api_key)
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ollama_host}/api/chat",
-                json=ollama_payload,
-                timeout=aiohttp.ClientTimeout(total=300)  # 5 minutes for large models
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"Ollama API returned {response.status}: {error_text}")
-                
-                response_data = await response.json()
-                
-    except aiohttp.ClientError as e:
-        raise Exception(f"Failed to connect to Ollama at {ollama_host}: {e}")
-    except Exception as e:
-        raise Exception(f"Ollama API call failed: {e}")
+    elif ai_provider == 'gemini':
+        if not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is required when AI_PROVIDER=gemini")
+        generated_query = await _call_gemini_api(messages, functions, gemini_model, gemini_api_key)
     
-    # Step 4: Extract the query from tool_calls
-    message = response_data.get('message', {})
-    tool_calls = message.get('tool_calls', [])
+    elif ai_provider == 'openrouter':
+        if not openrouter_api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable is required when AI_PROVIDER=openrouter")
+        generated_query = await _call_openrouter_api(messages, functions, openrouter_model, openrouter_api_key, openrouter_site_url, openrouter_app_name)
     
-    if not tool_calls:
-        raise Exception("Ollama did not return any tool calls")
+    elif ai_provider == 'ollama':
+        generated_query = await _call_ollama_api(messages, functions)
     
-    if len(tool_calls) == 0:
-        raise Exception("Ollama returned empty tool calls")
+    else:
+        raise ValueError(f"Unsupported AI_PROVIDER: {ai_provider}. Supported providers: openai, gemini, openrouter, ollama")
     
-    first_tool_call = tool_calls[0]
+    # Debug: Print the generated SQL query
+    print(f"🔍 Generated SQL Query: {generated_query}")
     
-    # Handle Ollama's tool call structure
-    try:
-        tool_function = first_tool_call.get('function', {})
-        function_name = tool_function.get('name', '')
-        
-        # Accept any function that looks like it's for SQL generation
-        if not function_name or function_name.lower() in ['', 'none']:
-            raise Exception(f"Ollama returned invalid function name: {function_name}")
-        
-        # Parse the arguments (they might be a JSON string)
-        arguments = tool_function.get('arguments', {})
-        if isinstance(arguments, str):
-            arguments = json.loads(arguments)
-        
-        # Try different possible key names for the query
-        generated_query = (
-            arguments.get('query') or 
-            arguments.get('sql') or 
-            arguments.get('sql_query') or
-            arguments.get('statement')
-        )
-            
-    except (KeyError, TypeError, json.JSONDecodeError) as e:
-        raise Exception(f"Failed to parse Ollama tool arguments: {e}")
-    
-    if not generated_query:
-        raise Exception("Ollama did not return a query in the tool arguments")
-    
-    # Step 5: Pass through verify_sql
+    # Step 4: Pass through verify_sql
     try:
         safe_query = verify_sql(generated_query)
     except SQLValidationError:
@@ -356,7 +369,7 @@ async def ask_db(question: str) -> list[dict]:
     if safe_query is None:
         raise UnsafeSQLError("Generated query was deemed unsafe by verify_sql")
     
-    # Step 6: Execute SQL with READ-ONLY connection and statement_timeout
+    # Step 5: Execute SQL with READ-ONLY connection and statement_timeout
     def execute_query():
         try:
             # Parse the DATABASE_URL to add read-only parameters
@@ -387,6 +400,272 @@ async def ask_db(question: str) -> list[dict]:
     result_rows = await asyncio.to_thread(execute_query)
     
     return result_rows
+
+
+async def _call_openai_api(messages: list, functions: list, model: str, api_key: str) -> str:
+    """Call OpenAI API for SQL generation."""
+    try:
+        client = AsyncOpenAI(api_key=api_key)
+        
+        # Convert our function format to OpenAI's tools format
+        tools = [
+            {
+                "type": "function",
+                "function": func["function"]
+            } for func in functions
+        ]
+        
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=0.0
+        )
+        
+        # Extract the function call
+        message = response.choices[0].message
+        
+        if not message.tool_calls:
+            raise Exception("OpenAI did not return any tool calls")
+        
+        tool_call = message.tool_calls[0]
+        function_args = json.loads(tool_call.function.arguments)
+        
+        # Extract the query
+        generated_query = (
+            function_args.get('query') or 
+            function_args.get('sql') or 
+            function_args.get('sql_query') or
+            function_args.get('statement')
+        )
+        
+        if not generated_query:
+            raise Exception("OpenAI did not return a query in the function arguments")
+        
+        return generated_query
+        
+    except Exception as e:
+        raise Exception(f"OpenAI API call failed: {e}")
+
+
+async def _call_gemini_api(messages: list, functions: list, model: str, api_key: str) -> str:
+    """Call Google Gemini API for SQL generation."""
+    try:
+        genai.configure(api_key=api_key)
+        
+        # Convert messages to Gemini format
+        conversation_text = ""
+        for msg in messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            conversation_text += f"{role}: {msg['content']}\n"
+        
+        # Create a simpler prompt that asks for just the SQL query
+        prompt = f"""{conversation_text}
+
+Please respond with ONLY a valid PostgreSQL SELECT query to answer the question. 
+Do not include any JSON, markdown, or explanations. Just return the SQL query directly.
+
+Example: SELECT COUNT(*) FROM table_name;"""
+        
+        # Create model instance
+        model_instance = genai.GenerativeModel(model)
+        
+        # Generate response
+        response = model_instance.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # Clean up the response - remove any markdown or extra formatting
+        import re
+        
+        # Remove markdown code blocks
+        response_text = re.sub(r'```sql\n?', '', response_text)
+        response_text = re.sub(r'```\n?', '', response_text)
+        
+        # Extract SQL query (look for SELECT statements)
+        sql_match = re.search(r'(SELECT[^;]*;?)', response_text, re.IGNORECASE | re.DOTALL)
+        if sql_match:
+            generated_query = sql_match.group(1).strip()
+        else:
+            # Fallback: use the entire cleaned response
+            generated_query = response_text.strip()
+        
+        # Remove trailing semicolon if present
+        if generated_query.endswith(';'):
+            generated_query = generated_query[:-1]
+        
+        if not generated_query or not generated_query.upper().startswith('SELECT'):
+            raise Exception(f"Gemini did not return a valid SQL query: {generated_query}")
+        
+        return generated_query
+        
+    except Exception as e:
+        raise Exception(f"Gemini API call failed: {e}")
+
+
+async def _call_ollama_api(messages: list, functions: list) -> str:
+    """Call Ollama API for SQL generation (fallback)."""
+    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    
+    # First, try to check if Ollama is running
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{ollama_host}/api/tags", timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    raise Exception(f"Ollama not responding at {ollama_host}")
+    except Exception as e:
+        raise Exception(f"Cannot connect to Ollama at {ollama_host}. Please ensure Ollama is running: {e}")
+    
+    ollama_payload = {
+        "model": ollama_model,
+        "messages": messages,
+        "tools": functions,
+        "options": {
+            "temperature": 0.0
+        },
+        "stream": False
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{ollama_host}/api/chat",
+                json=ollama_payload,
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"Ollama API returned {response.status}: {error_text}")
+                
+                response_data = await response.json()
+                
+    except aiohttp.ClientError as e:
+        raise Exception(f"Failed to connect to Ollama at {ollama_host}: {e}")
+    except Exception as e:
+        raise Exception(f"Ollama API call failed: {e}")
+    
+    # Extract the query from tool_calls
+    message = response_data.get('message', {})
+    tool_calls = message.get('tool_calls', [])
+    
+    if not tool_calls:
+        # Fallback: try to extract SQL from the message content
+        content = message.get('content', '')
+        if content:
+            import re
+            # Look for SQL in the content - more robust extraction
+            sql_patterns = [
+                r'```sql\s*(.*?)\s*```',  # SQL in code blocks
+                r'```\s*(SELECT[^`]*)\s*```',  # SELECT in code blocks
+                r'(SELECT[^.]*?)(?:\s*\.\s*|\s*$)',  # SELECT until period or end
+                r'(SELECT[^;]*;?)',  # Basic SELECT pattern
+            ]
+            
+            for pattern in sql_patterns:
+                sql_match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+                if sql_match:
+                    extracted_sql = sql_match.group(1).strip()
+                    # Clean up common extra text
+                    extracted_sql = re.sub(r'\s*\.\s*This.*$', '', extracted_sql, flags=re.IGNORECASE)
+                    extracted_sql = re.sub(r'\s*,\s*which.*$', '', extracted_sql, flags=re.IGNORECASE)
+                    extracted_sql = extracted_sql.rstrip(';.,')
+                    return extracted_sql
+        raise Exception("Ollama did not return any tool calls or valid SQL")
+    
+    first_tool_call = tool_calls[0]
+    
+    try:
+        tool_function = first_tool_call.get('function', {})
+        function_name = tool_function.get('name', '')
+        
+        if not function_name or function_name.lower() in ['', 'none']:
+            raise Exception(f"Ollama returned invalid function name: {function_name}")
+        
+        arguments = tool_function.get('arguments', {})
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+        
+        generated_query = (
+            arguments.get('query') or 
+            arguments.get('sql') or 
+            arguments.get('sql_query') or
+            arguments.get('statement')
+        )
+            
+    except (KeyError, TypeError, json.JSONDecodeError) as e:
+        raise Exception(f"Failed to parse Ollama tool arguments: {e}")
+    
+    if not generated_query:
+        raise Exception("Ollama did not return a query in the tool arguments")
+    
+    return generated_query
+
+
+async def _call_openrouter_api(messages: list, functions: list, model: str, api_key: str, site_url: str, app_name: str) -> str:
+    """Call OpenRouter API for SQL generation."""
+    try:
+        # OpenRouter uses OpenAI-compatible API format
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": site_url,
+            "X-Title": app_name,
+            "Content-Type": "application/json"
+        }
+        
+        # Convert our function format to OpenAI's tools format
+        tools = [
+            {
+                "type": "function",
+                "function": func["function"]
+            } for func in functions
+        ]
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.0
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"OpenRouter API returned {response.status}: {error_text}")
+                
+                response_data = await response.json()
+        
+        # Extract the function call (same format as OpenAI)
+        message = response_data["choices"][0]["message"]
+        
+        if not message.get("tool_calls"):
+            raise Exception("OpenRouter did not return any tool calls")
+        
+        tool_call = message["tool_calls"][0]
+        function_args = json.loads(tool_call["function"]["arguments"])
+        
+        # Extract the query
+        generated_query = (
+            function_args.get('query') or 
+            function_args.get('sql') or 
+            function_args.get('sql_query') or
+            function_args.get('statement')
+        )
+        
+        if not generated_query:
+            raise Exception("OpenRouter did not return a query in the function arguments")
+        
+        return generated_query
+        
+    except Exception as e:
+        raise Exception(f"OpenRouter API call failed: {e}")
 
 
 async def search_documents(query: str, top_n: int = 3) -> list[dict]:
@@ -554,9 +833,12 @@ async def summarize_rows(rows: list[dict], question: str) -> str:
     Summarizes query results into a human-readable format.
     
     For small result sets (≤20 rows), returns a formatted Markdown table.
-    For larger result sets (>20 rows), uses Ollama to generate a concise summary.
+    For larger result sets (>20 rows), uses OpenAI GPT or Ollama to generate a concise summary.
     
     Environment Variables:
+        OPENAI_API_KEY (optional): OpenAI API key (if using OpenAI)
+        OPENAI_MODEL (optional): Model to use for summarization (default: gpt-3.5-turbo)
+        USE_OLLAMA (optional): Set to 'true' to use Ollama instead of OpenAI
         OLLAMA_HOST (optional): Ollama server URL (default: http://localhost:11434)
         OLLAMA_MODEL (optional): Model to use for summarization (default: mistral:7b-instruct)
     
@@ -568,7 +850,7 @@ async def summarize_rows(rows: list[dict], question: str) -> str:
         A string containing either a Markdown table or an AI-generated summary
         
     Raises:
-        Exception: If Ollama API call fails for large result sets
+        Exception: If API call fails for large result sets
         
     Example:
         # Small result set
@@ -576,7 +858,8 @@ async def summarize_rows(rows: list[dict], question: str) -> str:
         result = await summarize_rows(rows, "Who are the users?")
         # Returns a Markdown table
         
-        # Large result set
+        # Large result set with OpenAI
+        export OPENAI_API_KEY='your-key'
         rows = [{"product": f"Item {i}", "sales": i*100} for i in range(50)]
         result = await summarize_rows(rows, "What are the top selling products?")
         # Returns an AI-generated summary
@@ -619,9 +902,8 @@ async def summarize_rows(rows: list[dict], question: str) -> str:
         
         return "\n".join(markdown_lines)
     
-    # For large result sets, use Ollama to summarize
-    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    # For large result sets, use AI to summarize
+    use_ollama = os.getenv('USE_OLLAMA', 'false').lower() == 'true'
     
     # Prepare a sample of the data for summarization
     sample_size = min(5, len(rows))
@@ -643,39 +925,62 @@ Keep the summary brief but informative."""
 
     messages = [{"role": "user", "content": summary_prompt}]
     
-    ollama_payload = {
-        "model": ollama_model,
-        "messages": messages,
-        "options": {
-            "temperature": 0.1
-        },
-        "stream": False
-    }
-    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ollama_host}/api/chat",
-                json=ollama_payload,
-                timeout=aiohttp.ClientTimeout(total=120)  # Increased timeout for mistral
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    # Fallback to basic summary if Ollama fails
-                    return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
-                
-                response_data = await response.json()
-                
-                # Extract the summary from Ollama's response
-                message = response_data.get('message', {})
-                summary = message.get('content', '')
-                
-                if summary:
-                    return summary.strip()
-                else:
-                    # Fallback if no content
-                    return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
+        if use_ollama:
+            # Use Ollama
+            ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+            ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+            
+            ollama_payload = {
+                "model": ollama_model,
+                "messages": messages,
+                "options": {
+                    "temperature": 0.1
+                },
+                "stream": False
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{ollama_host}/api/chat",
+                    json=ollama_payload,
+                    timeout=aiohttp.ClientTimeout(total=120)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        # Fallback to basic summary if Ollama fails
+                        return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
                     
+                    response_data = await response.json()
+                    
+                    # Extract the summary from Ollama's response
+                    message = response_data.get('message', {})
+                    summary = message.get('content', '')
+        else:
+            # Use OpenAI
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            openai_model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+            
+            if not openai_api_key:
+                return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
+            
+            client = AsyncOpenAI(api_key=openai_api_key)
+            
+            response = await client.chat.completions.create(
+                model=openai_model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=500
+            )
+            
+            summary = response.choices[0].message.content
+        
+        if summary:
+            return summary.strip()
+        else:
+            # Fallback if no content
+            return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
+            
     except Exception as e:
         # Fallback to basic summary if anything fails
         return f"Query returned {len(rows)} rows. First few results:\n{json.dumps(sample_rows, indent=2)}"
@@ -689,12 +994,15 @@ async def generate_final_answer(question: str) -> str:
     1. Queries the database using ask_db()
     2. Summarizes database results using summarize_rows()
     3. Searches for relevant external documents using search_documents()
-    4. Combines all information and uses Ollama to generate a final answer
+    4. Combines all information and uses OpenAI GPT or Ollama to generate a final answer
     
     Environment Variables:
         DATABASE_URL (required): PostgreSQL connection string
+        OPENAI_API_KEY (optional): OpenAI API key (if using OpenAI)
+        OPENAI_MODEL (optional): Chat model for final answer (default: gpt-3.5-turbo)
+        USE_OLLAMA (optional): Set to 'true' to use Ollama instead of OpenAI
         OLLAMA_HOST (optional): Ollama server URL (default: http://localhost:11434)
-        OLLAMA_MODEL (optional): Chat model for final answer (default: mistral:7b-instruct)
+        OLLAMA_MODEL (optional): Ollama model for final answer (default: mistral:7b-instruct)
         OLLAMA_EMBEDDING_MODEL (optional): Embedding model for document search (default: mxbai-embed-large)
     
     Args:
@@ -708,16 +1016,28 @@ async def generate_final_answer(question: str) -> str:
         Exception: If any component fails (with graceful degradation)
         
     Example:
-        # Set up environment
+        # Set up environment for OpenAI
         export DATABASE_URL='postgresql://postgres:2336@localhost:5432/pagila'
+        export OPENAI_API_KEY='your-openai-api-key'
+        export OPENAI_MODEL='gpt-4'
+        
+        # OR set up environment for Ollama
+        export DATABASE_URL='postgresql://postgres:2336@localhost:5432/pagila'
+        export USE_OLLAMA='true'
         export OLLAMA_MODEL='mistral:7b-instruct'
         
         # Use the function
         answer = await generate_final_answer("What are the most popular film genres and their characteristics?")
         print(answer)
     """
-    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-    ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    use_ollama = os.getenv('USE_OLLAMA', 'false').lower() == 'true'
+    
+    if use_ollama:
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+        ollama_model = os.getenv('OLLAMA_MODEL', 'mistral:7b-instruct')
+    else:
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        openai_model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
     
     # Initialize components for the final answer
     db_summary = ""
@@ -769,7 +1089,8 @@ async def generate_final_answer(question: str) -> str:
         doc_section = "## External Documents\n\n"
         for i, doc in enumerate(documents, 1):
             # Truncate very long documents
-            truncated_doc = doc[:500] + "..." if len(doc) > 500 else doc
+            doc_content = doc.get('content', str(doc))
+            truncated_doc = doc_content[:500] + "..." if len(doc_content) > 500 else doc_content
             doc_section += f"### Document {i}\n{truncated_doc}\n\n"
         context_parts.append(doc_section)
     
@@ -802,46 +1123,64 @@ Unfortunately, I was unable to retrieve relevant information from either the dat
 
 Please check your environment configuration and try again. You may need to:
 1. Set DATABASE_URL for database access
-2. Run setup_document_search.py for document search functionality
-3. Ensure Ollama is running locally"""
+2. Set OPENAI_API_KEY for OpenAI access (or USE_OLLAMA=true for Ollama)
+3. Run setup_document_search.py for document search functionality
+4. Ensure Ollama is running locally (if using Ollama)"""
 
-    # Step 4: Call Ollama to generate the final answer
+    # Step 4: Call API to generate the final answer
     messages = [{"role": "user", "content": final_prompt}]
     
-    ollama_payload = {
-        "model": ollama_model,
-        "messages": messages,
-        "options": {
-            "temperature": 0.2  # Slightly more creative for final answers
-        },
-        "stream": False
-    }
-    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ollama_host}/api/chat",
-                json=ollama_payload,
-                timeout=aiohttp.ClientTimeout(total=90)  # Longer timeout for complex answers
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"Ollama API returned {response.status}: {error_text}")
-                
-                response_data = await response.json()
-                
-                # Extract the final answer
-                message = response_data.get('message', {})
-                final_answer = message.get('content', '')
-                
-                if final_answer:
-                    print(f"   ✅ Generated final answer ({len(final_answer)} chars)")
-                    return final_answer.strip()
-                else:
-                    raise Exception("Ollama returned empty response")
+        if use_ollama:
+            # Use Ollama
+            ollama_payload = {
+                "model": ollama_model,
+                "messages": messages,
+                "options": {
+                    "temperature": 0.2
+                },
+                "stream": False
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{ollama_host}/api/chat",
+                    json=ollama_payload,
+                    timeout=aiohttp.ClientTimeout(total=90)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise Exception(f"Ollama API returned {response.status}: {error_text}")
                     
+                    response_data = await response.json()
+                    
+                    # Extract the final answer
+                    message = response_data.get('message', {})
+                    final_answer = message.get('content', '')
+        else:
+            # Use OpenAI
+            if not openai_api_key:
+                raise Exception("OPENAI_API_KEY is required when USE_OLLAMA is not set to 'true'")
+            
+            client = AsyncOpenAI(api_key=openai_api_key)
+            
+            response = await client.chat.completions.create(
+                model=openai_model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=2000
+            )
+            
+            final_answer = response.choices[0].message.content
+        
+        if final_answer:
+            print(f"   ✅ Generated final answer ({len(final_answer)} chars)")
+            return final_answer.strip()
+        else:
+            raise Exception("API returned empty response")
+            
     except Exception as e:
-        # Fallback to a basic combined response if Ollama fails
+        # Fallback to a basic combined response if API fails
         fallback_answer = f"""# Answer to: {question}
 
 ## Summary
@@ -857,7 +1196,8 @@ I encountered an issue generating the AI-powered final answer: {e}
         if documents:
             fallback_answer += "### External Documents\n"
             for i, doc in enumerate(documents, 1):
-                truncated_doc = doc[:300] + "..." if len(doc) > 300 else doc
+                doc_content = doc.get('content', str(doc))
+                truncated_doc = doc_content[:300] + "..." if len(doc_content) > 300 else doc_content
                 fallback_answer += f"**Document {i}:** {truncated_doc}\n\n"
         
         if not db_summary and not documents:
